@@ -1,0 +1,90 @@
+# dashboard_sentiment.py
+
+import os
+import re
+from datetime import datetime, timedelta
+import pandas as pd
+import plotly.graph_objects as go
+from transformers import pipeline
+from pytube import Search
+from instaloader import Instaloader, Hashtag
+
+# Setup
+YL_PERIOD = 90  # days
+TARGET = "코치"
+
+# 1. fetch YouTube comments (via Pytube)
+def fetch_youtube_comments(query, max_vid=20):
+    vids = Search(query).results[:max_vid]
+    comments = []
+    for vid in vids:
+        for c in vid.comments:
+            d = datetime.fromtimestamp(c.time.timestamp())
+            if d > datetime.now() - timedelta(days=YL_PERIOD):
+                comments.append(c.text)
+    return comments
+
+# 2. fetch Instagram hashtag comments via Instaloader
+def fetch_instagram_comments(hashtag, max_posts=50):
+    L = Instaloader()
+    comments = []
+    for post in Hashtag.from_name(L.context, hashtag).get_posts():
+        if post.date_utc > datetime.now() - timedelta(days=YL_PERIOD):
+            for c in post.get_comments():
+                comments.append(c.text)
+        if len(comments) > max_posts:
+            break
+    return comments
+
+# 3. clean text
+def clean(text):
+    text = re.sub(r'http\S+|[\U00010000-\U0010ffff]', '', text)
+    return text.strip()
+
+# 4. sentiment classifier
+sent = pipeline("sentiment-analysis", model="monologg/kobert", tokenizer="monologg/kobert")
+
+def analyze(comments):
+    df = pd.DataFrame({"text": list(map(clean, comments))})
+    df.drop_duplicates(inplace=True)
+    res = sent(df.text.tolist())
+    df = df.assign(sentiment=[r['label'] for r in res])
+    return df
+
+# 5. scoring
+def compute_score(df):
+    counts = df.sentiment.value_counts(normalize=True)
+    return (counts.get("POSITIVE",0)*1 + counts.get("NEUTRAL",0)*0.5)*100
+
+# 6. summarize KOL comments
+def extract_kol(df, top_n=3):
+    # placeholder: pick first few positive/neutral/negative
+    subs = {s: df[df.sentiment==s].text.tolist()[:top_n] for s in ["POSITIVE","NEUTRAL","NEGATIVE"]}
+    return subs
+
+# 7. build dashboard with plotly
+def build_dashboard(score, df, kol):
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number", value=score, title={'text':f"COACH Korea Sentiment Score (last 3 mo)"}, gauge={'axis':{'range':[0,100]}}))
+    fig.add_trace(go.Bar(x=df.sentiment.value_counts().index, y=df.sentiment.value_counts().values))
+    fig.update_layout(title_text="Sentiment Breakdown")
+    fig.show()
+
+    # Print KOL remarks
+    for s,v in kol.items():
+        print(f"\n--- {s} comments by key opinion leaders:")
+        for txt in v:
+            print("-", txt)
+
+# --- Main execution ---
+def main():
+    yt_comments = fetch_youtube_comments(TARGET)
+    ig_comments = fetch_instagram_comments("coach")
+    all_comments = yt_comments + ig_comments
+    df = analyze(all_comments)
+    score = compute_score(df)
+    kol = extract_kol(df)
+    build_dashboard(score, df, kol)
+
+if __name__=="__main__":
+    main()
